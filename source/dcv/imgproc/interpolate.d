@@ -136,6 +136,7 @@ pure @fastmath auto linearImpl_1(T)(Slice!(SliceKind.contiguous, [1], T*) range,
 pure @fastmath auto linearImpl_2(SliceKind kind, size_t[] packs, T)(Slice!(kind, packs, T*) range, double pos_x, double pos_y)
 {
     import mir.math.internal : floor;
+    import std.traits : Unqual;
 
     assert(pos_x < range.length!0 && pos_y < range.length!1);
 
@@ -163,11 +164,10 @@ pure @fastmath auto linearImpl_2(SliceKind kind, size_t[] packs, T)(Slice!(kind,
     }
     else
     {
-        T v1, v2, v3, v4;
-        v1 = range[rx, ry];
-        v2 = range[x_end ? rx : rx + 1, ry];
-        v3 = range[rx, y_end ? ry : ry + 1];
-        v4 = range[x_end ? rx : rx + 1, y_end ? ry : ry + 1];
+        auto v1 = range[rx, ry];
+        auto v2 = range[x_end ? rx : rx + 1, ry];
+        auto v3 = range[rx, y_end ? ry : ry + 1];
+        auto v4 = range[x_end ? rx : rx + 1, y_end ? ry : ry + 1];
     }
     return cast(T)(v1 * w00 + v2 * w01 + v3 * w10 + v4 * w11);
 }
