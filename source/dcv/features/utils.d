@@ -49,7 +49,7 @@ Returns:
     Dynamic array of size_t[2], as in array of 2D points, of corner reponses 
     which fit the given criteria.
 */
-pure nothrow auto extractCorners(T)
+pure nothrow Slice!(Contiguous, [2], size_t*) extractCorners(T)
     (Slice!(Contiguous, [2], T*) cornerResponse, int count = -1, T threshold = 0)
 if ( isNumeric!T )
 {
@@ -61,19 +61,30 @@ if ( isNumeric!T )
 
     if (cornerResponse.empty)
     {
-        return null;
+        return typeof(return)();
     }
 
     // TODO: test if corner response is contiguous, or better yet - change
     //       the implementation not to depend on contiguous slice.
 
-    return zip(ndiota(cornerResponse.shape), cornerResponse)
+    auto corners = zip(ndiota(cornerResponse.shape), cornerResponse)
         .flattened
         .filter!(p => p.b > threshold)
         .array
         .topN!((a, b) => a.b > b.b)(count)
-        .map!(p => p.a)
-        .array;
+        .map!(p => p.a);
+
+    auto cornerSlice = slice!size_t(corners.length, 2);
+    auto cornerRange = cornerSlice;
+
+    corners.each!( (c)
+    {
+        cornerRange.front[0] = c[1];
+        cornerRange.front[1] = c[0];
+        cornerRange.popFront;
+    });
+
+    return cornerSlice;
 }
 
 unittest
