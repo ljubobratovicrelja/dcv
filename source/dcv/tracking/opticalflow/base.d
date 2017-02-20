@@ -9,16 +9,21 @@ License: $(LINK3 http://www.boost.org/LICENSE_1_0.txt, Boost Software License - 
 */
 module dcv.tracking.opticalflow.base;
 
-public import mir.ndslice.slice : Slice, SliceKind;
+import std.typecons : Flag, No;
 
-public import dcv.core.image : Image;
-public import dcv.core.utils : emptySlice;
+import mir.ndslice.slice : Slice, SliceKind;
+
+import dcv.core.image : Image;
+import dcv.core.utils : emptySlice;
 
 /**
 Sparse Optical Flow algorithm interface.
 */
-interface SparseOpticalFlow
+mixin template SparseOpticalFlow(PixelType, CoordType)
 {
+    import std.traits : isFloatingPoint;
+
+    static assert(isFloatingPoint!CoordType, "Coordinate type has to be a floating point type.");
 
     /**
     Evaluate sparse optical flow method between two consecutive frames.
@@ -35,8 +40,35 @@ interface SparseOpticalFlow
     Returns:
         Array of 2 floating point values which represent movement of each given feature point, from f1 to f2.
     */
-    float[2][] evaluate(inout Image f1, inout Image f2, in float[2][] points,
-            in float[2][] searchRegions, float[2][] prevflow = null, bool usePrevious = false);
+    void evaluate
+    (
+        Slice!(Contiguous, [2], const(PixelType)*) prevFrame,
+        Slice!(Contiguous, [2], const(PixelType)*) currFrame,
+        Slice!(Contiguous, [2], const(CoordType)*) prevPoints,
+        ref Slice!(Contiguous, [2], CoordType*) currPoints,
+        Slice!(Contiguous, [1], float*) error = Slice!(Contiguous, [1], float*).init,
+        Flag!"usePrevious" up = No.usePrevious
+    )
+    in
+    {
+        assert(!prevFrame.empty, "Given image slices should not be empty.");
+        assert(prevFrame.shape == currFrame.shape, "Given images should be of same size.");
+        assert(!prevPoints.empty, "Given source (previous) point slice should not be empty.");
+        assert(prevPoints.length!1 == 2, "Point slice malformed - should be n-by-2, for n points (x,y).");
+        if (up)
+            assert(currPoints.shape == prevPoints.shape, "Invalid destination frame shape - should be same as previous.");
+        if(!error.empty)
+            assert(error.length != prevPoints.length, "If errors are to be calculated, error slice has to be of same size as points.");
+    }
+    body
+    {
+        if (!up)
+        {
+            currPoints = prevPoints.slice;
+        }
+
+        evaluateImpl(prevFrame, currFrame, prevPoints, currPoints, error);
+    }
 }
 
 /// Alias to a type used to define the dense optical flow field.

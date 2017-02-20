@@ -127,8 +127,8 @@ class HornSchunckFlow : DenseOpticalFlow
 
             auto g = gaussian!float(props.gaussSigma, props.gaussKernelSize, props.gaussKernelSize);
 
-            current = conv!neumann(current, g);
-            next = conv!neumann(next, g);
+            current = conv!(float, neumann)(current, g);
+            next = conv!(float, neumann)(next, g);
         }
 
         int iter = 0;

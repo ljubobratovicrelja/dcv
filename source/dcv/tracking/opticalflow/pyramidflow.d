@@ -33,7 +33,6 @@ import mir.ndslice.topology: as, flattened, iota;
 
 /**
 Sparse pyramidal optical flow utility class.
-*/
 class SparsePyramidFlow : SparseOpticalFlow
 {
 
@@ -156,6 +155,7 @@ class SparsePyramidFlow : SparseOpticalFlow
         return flow;
     }
 }
+*/
 
 /**
 Dense pyramidal optical flow utility class.
