@@ -17,8 +17,9 @@ import dcv.imgproc.filter : filterNonMaximum;
 import dcv.imgproc.color : gray2rgb;
 import dcv.features.corner.harris : shiTomasiCorners;
 import dcv.features.utils : extractCorners;
-import dcv.tracking.opticalflow : LucasKanadeFlow, SparsePyramidFlow;
+import dcv.tracking.opticalflow : LucasKanadeFlow;
 import dcv.plot.figure;
+import dcv.imgproc.imgmanip : scale;
 
 import ggplotd.aes;
 import ggplotd.geom;
@@ -101,87 +102,51 @@ int main(string[] args)
         return 1;
     }
 
-    Image prevFrame, thisFrame; // image frames, for tracking
+    Image frame;
+    Slice!(Contiguous, [2], float*) prevFrame, thisFrame; // image frames, for tracking
 
-    auto cornerW = args.length >= 4 ? args[3].to!float : 15.0f; // size of the tracking kernel
-    auto cornerCount = args.length >= 5 ? args[4].to!uint : 20; // numer of corners tracked
+    auto cornerW = args.length >= 4 ? args[3].to!size_t: 15; // size of the tracking kernel
+    auto cornerCount = args.length >= 5 ? args[4].to!uint : 10; // numer of corners tracked
     auto frames = args.length >= 6 ? args[5].to!uint : 100; // maximum frame count to be tracked
     auto pyrLevels = args.length >= 7 ? args[6].to!uint : 3; // number of levels in the optical flow pyramid
-    auto iterCount = args.length >= 8 ? args[7].to!uint : 10; // number of levels in the optical flow pyramid
+    auto iterCount = args.length >= 8 ? args[7].to!uint : 30; // number of levels in the optical flow pyramid
     auto eigLim = args.length >= 9 ? args[8].to!float : 1000.0f; // corner eigenvalue limit, after which the feature is invalid.
 
     // initialize and setup the optical flow algorithm
-    LucasKanadeFlow lkFlow = new LucasKanadeFlow;
-    SparsePyramidFlow spFlow = new SparsePyramidFlow(lkFlow, pyrLevels);
-
-    lkFlow.sigma = 0.80f;
+    LucasKanadeFlow!(float, float) lkFlow;
+    lkFlow.sigma = 2.80f;
+    lkFlow.windowSize[] = cornerW;
     lkFlow.iterationCount = iterCount;
 
-    float[2][] corners;
-    float[2][] reg = new float[2][cornerCount].map!(v => cast(float[2])[cornerW, cornerW]).array;
+    //SparsePyramidFlow spFlow = new SparsePyramidFlow(lkFlow, pyrLevels);
+
+    Slice!(Contiguous, [2], float*) corners, tracked;
+    Slice!(Contiguous, [1], float*) errors;
 
     // read first frame and use it to detect initial corners for tracking
-    stream.readFrame(prevFrame);
+    stream.readFrame(frame);
+
     // take the y channel and form an image
-    prevFrame = prevFrame.sliced[0 .. $, 0 .. $, 0].asImage(ImageFormat.IF_MONO);
+    prevFrame = frame.sliced[0 .. $, 0 .. $, 0].as!float.slice;
 
-    auto h = prevFrame.height;
-    auto w = prevFrame.width;
-    auto frame = 0; // frame counter
+    corners = prevFrame.shiTomasiCorners.filterNonMaximum.extractCorners(cornerCount).as!float.slice;
 
-    while (stream.readFrame(thisFrame))
+    auto h = prevFrame.length!0;
+    auto w = prevFrame.length!1;
+    auto frameNum = 0; // frame counter
+
+    while (stream.readFrame(frame))
     {
-        writeln("Tracking frame no. " ~ frame.to!string ~ "...");
+        writeln("Tracking frame no. " ~ frameNum.to!string ~ "...");
 
         // take the y channel, and form an image of it.
-        thisFrame = thisFrame.sliced[0 .. $, 0 .. $, 0].asImage(ImageFormat.IF_MONO);
-
-        // if corner count has dropped below 50% of original count, try to detect new points.
-        if (corners.length < (cornerCount / 2))
-        {
-            writeln("Search features again...");
-            int err;
-            auto c = shiTomasiCorners(prevFrame.sliced.reshape([h, w], err).as!float.slice, cast(uint)cornerW)
-                .filterNonMaximum.extractCorners(cornerCount);
-
-            assert(err == 0);
-
-            foreach (v; c)
-                corners ~= [cast(float)v[0], cast(float)v[1]];
-        }
+        thisFrame = frame.sliced[0 .. $, 0 .. $, 0].as!float.slice;
 
         // evaluate the optical flow
-        auto flow = spFlow.evaluate(prevFrame, thisFrame, corners, reg);
-
-        // discard faulty tracked corners
-        auto fback = corners;
-        corners.length = 0;
-        foreach (id, e; lkFlow.cornerResponse)
-        {
-            import std.math : isNaN;
-            import std.algorithm : remove;
-
-            if (!isNaN(e) && e > eigLim)
-            {
-                corners ~= fback[id];
-            }
-            else
-            {
-                writeln("Removing corner no. ", id, " with score: ", e);
-            }
-        }
-
-        // Displace previous corner coordinates with newly estimated flow vectors
-        foreach (ref c, f; lockstep(corners, flow))
-        {
-            c[0] = c[0] + f[1];
-            c[1] = c[1] + f[0];
-        }
+        lkFlow.evaluate(prevFrame, thisFrame, corners, tracked, errors);
 
         // draw tracked corners and write the image
-        int err;
-        auto f2c = thisFrame.sliced.reshape([h, w], err).gray2rgb.as!float.slice;
-        assert(err == 0);
+        auto f2c = thisFrame.gray2rgb;
 
         // plot tracked points on screen.
         f2c.plot(plotPoints(corners), "KLT");
@@ -189,23 +154,24 @@ int main(string[] args)
         if (waitKey(10) == KEY_ESCAPE)
             break;
 
-        if (++frame >= frames)
-            break;
-
         // take this frame as next one's previous
         prevFrame = thisFrame;
+        corners = tracked;
 
         if (!figure("KLT").visible)
+            break;
+
+        if (++frameNum >= frames)
             break;
     }
 
     return 0;
 }
 
-GGPlotD plotPoints(float[2][] corners)
+GGPlotD plotPoints(T)(Slice!(Contiguous, [2], T*) corners)
 {
-    auto xs = corners.map!(v => v[1]);
-    auto ys = corners.map!(v => v[0]);
+    auto xs = corners.flattened.universal.strided(0, 2);
+    auto ys = corners.flattened[1 .. $].universal.strided(0, 2);
 
     return GGPlotD().put(geomPoint(Aes!(typeof(xs), "x", typeof(ys), "y", bool[], "fill", string[], "colour")
             (xs, ys, false.repeat(xs.length).array, "red".repeat(xs.length).array)));
