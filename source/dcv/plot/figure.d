@@ -537,7 +537,7 @@ class Figure
 
 
     /// Get a copy of image currently drawn on figure's canvas.
-    @property image() const 
+    @property image() const
     in
     {
         assert(width && height);
@@ -597,6 +597,11 @@ class Figure
 
     /// Draw image onto figure canvas.
     void draw(Image image)
+    out
+    {
+        assert(image.data.length == _data.length);
+    }
+    body
     {
         Image showImage = adoptImage(image);
 
@@ -891,9 +896,9 @@ void closeCallbackWrapper(GLFWwindow* window)
 Image adoptImage(Image image)
 {
     import dcv.imgproc.color : yuv2rgb, gray2rgb;
+    import mir.ndslice.topology;
 
     Image showImage = (image.depth != BitDepth.BD_8) ? image.asType!ubyte : image;
-    import mir.ndslice.topology;
     switch (showImage.format)
     {
     case ImageFormat.IF_RGB_ALPHA:
@@ -930,6 +935,11 @@ Image adoptImage(Image image)
 }
 
 version(ggplotd) void drawGGPlotD(GGPlotD gg,  ubyte[] data,  int width, int height)
+in
+{
+    assert(data.length == width * height * 3);
+}
+body
 {
     import std.range : iota;
     import cairo = cairo;
@@ -946,12 +956,15 @@ version(ggplotd) void drawGGPlotD(GGPlotD gg,  ubyte[] data,  int width, int hei
     auto imSurface = cast(cairo.ImageSurface)surface; 
     auto surfData = imSurface.getData();
 
-    foreach (r; iota(height))
+    surface.flush();
+
+    foreach (r; 0 .. height)
         foreach (c; 0 .. width)
         {
             auto pixpos = (height - r - 1) * width * 4 + c * 4;
             auto dpixpos = r * width * 3 + c * 3;
             auto alpha = surfData[pixpos + 3];
+
             if (alpha)
             {
                 auto af = cast(float)alpha / 255.0f;
