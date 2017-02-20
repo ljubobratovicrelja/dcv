@@ -34,7 +34,8 @@ License: $(LINK3 http://www.boost.org/LICENSE_1_0.txt, Boost Software License - 
 */
 module dcv.imgproc.convolution;
 
-import std.traits : isAssignable, ReturnType;
+import std.range : ElementType;
+import std.traits : isAssignable, ReturnType, Unqual;
 import std.conv : to;
 import std.parallelism : parallel, taskPool, TaskPool;
 
@@ -72,23 +73,23 @@ Returns:
 Note:
     Input, mask and pre-allocated slices' strides must be the same.
 */
-InputTensor conv
-    (alias bc = neumann, InputTensor, KernelTensor, MaskTensor = KernelTensor)
-    (InputTensor input, KernelTensor kernel, InputTensor prealloc = InputTensor.init,
-     MaskTensor mask = MaskTensor.init, TaskPool pool = taskPool)
+auto conv(OutputType = float, alias bc = neumann, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType = ubyte)
+(
+    Slice!(Contiguous, packs, InputIterator) input,
+    Slice!(Contiguous, kPacks, KernelIterator) kernel,
+    Slice!(Contiguous, packs, OutputType*) prealloc = Slice!(Contiguous, packs, OutputType*).init,
+    Slice!(Contiguous, kPacks, MaskType*) mask = Slice!(Contiguous, kPacks, MaskType*).init,
+    TaskPool pool = taskPool
+)
 in
 {
-    static assert(isSlice!InputTensor, "Input tensor has to be of type mir.ndslice.slice.Slice");
-    static assert(isSlice!KernelTensor, "Kernel tensor has to be of type mir.ndslice.slice.Slice");
-    static assert(isSlice!MaskTensor, "Mask tensor has to be of type mir.ndslice.slice.Slice");
     static assert(isBoundaryCondition!bc, "Invalid boundary condition test function.");
-    static assert(isAssignable!(DeepElementType!InputTensor, DeepElementType!KernelTensor),
-            "Incompatible types for input and kernel");
 
-    immutable N = InputTensor.init.shape.length;
-    immutable NK = KernelTensor.init.shape.length;
+    static assert(packs.length == 1, "Given slices must not be packed.");
+    static assert(kPacks.length == 1, "Given mask and kernel slices must not be packed.");
 
-    static assert(MaskTensor.init.shape.length == NK, "Mask tensor has to be of same dimension as the kernel tensor.");
+    immutable N = packs[0];
+    immutable NK = kPacks[0];
 
     immutable invalidKernelMsg = "Invalid kernel dimension";
     static if (N == 1)
@@ -118,11 +119,10 @@ body
 {
     import mir.ndslice.allocation;
 
-    static if (prealloc._strides.length == 0)
-        if (prealloc.shape != input.shape)
-            prealloc = uninitializedSlice!(DeepElementType!InputTensor)(input.shape);
+    if (prealloc.shape != input.shape)
+        prealloc = uninitializedSlice!OutputType(input.shape);
 
-    return convImpl!bc(input, kernel, prealloc, mask, pool);
+    return convImpl!(OutputType, bc)(input, kernel, prealloc, mask, pool);
 }
 
 unittest
@@ -159,12 +159,17 @@ nothrow @nogc @fastmath auto kapply(T)(const T r, const T i, const T k)
 
 private:
 
-auto convImpl
-    (alias bc = neumann, InputTensor, KernelTensor, MaskTensor)
-    (InputTensor input, KernelTensor kernel, InputTensor prealloc, MaskTensor mask, TaskPool pool) 
-if (InputTensor.init.shape.length == 1)
+auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+(
+    Slice!(Contiguous, packs, InputIterator) input,
+    Slice!(Contiguous, kPacks, KernelIterator) kernel,
+    Slice!(Contiguous, packs, OutputType*) prealloc,
+    Slice!(Contiguous, kPacks, MaskType*) mask,
+    TaskPool pool = taskPool
+)
+if (packs[0] == 1)
 {
-    alias InputType = DeepElementType!InputTensor;
+    alias InputType = ElementType!InputIterator;
 
     auto kl = kernel.length;
     auto kh = kl / 2;
@@ -194,10 +199,15 @@ if (InputTensor.init.shape.length == 1)
     return prealloc;
 }
 
-auto convImpl
-    (alias bc = neumann, InputTensor, KernelTensor, MaskTensor)
-    (InputTensor input, KernelTensor kernel, InputTensor prealloc, MaskTensor mask, TaskPool pool) 
-if (InputTensor.init.shape.length == 2)
+auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+(
+    Slice!(Contiguous, packs, InputIterator) input,
+    Slice!(Contiguous, kPacks, KernelIterator) kernel,
+    Slice!(Contiguous, packs, OutputType*) prealloc,
+    Slice!(Contiguous, kPacks, MaskType*) mask,
+    TaskPool pool = taskPool
+)
+if (packs[0] == 2)
 {
     auto krs = kernel.length!0; // kernel rows
     auto kcs = kernel.length!1; // kernel rows
@@ -233,10 +243,15 @@ if (InputTensor.init.shape.length == 2)
     return prealloc;
 }
 
-auto convImpl
-    (alias bc = neumann, InputTensor, KernelTensor, MaskTensor)
-    (InputTensor input, KernelTensor kernel, InputTensor prealloc, MaskTensor mask, TaskPool pool) 
-if (InputTensor.init.shape.length == 3)
+auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+(
+    Slice!(Contiguous, packs, InputIterator) input,
+    Slice!(Contiguous, kPacks, KernelIterator) kernel,
+    Slice!(Contiguous, packs, OutputType*) prealloc,
+    Slice!(Contiguous, kPacks, MaskType*) mask,
+    TaskPool pool = taskPool
+)
+if (packs[0] == 3)
 {
     foreach (i; 0 .. input.length!2)
     {
@@ -248,14 +263,14 @@ if (InputTensor.init.shape.length == 3)
     return prealloc;
 }
 
-void handleEdgeConv1d(alias bc, T, K, M,
+void handleEdgeConv1d(alias bc, T, O, K, M,
     SliceKind kindi,
     SliceKind kindp,
     SliceKind kindk,
     SliceKind kindm,
     )(
     Slice!(kindi, [1], T*) input,
-    Slice!(kindp, [1], T*) prealloc,
+    Slice!(kindp, [1], O*) prealloc,
     Slice!(kindk, [1], K*) kernel,
     Slice!(kindm, [1], M*) mask,
     size_t from, size_t to)
@@ -270,7 +285,7 @@ body
 
     bool useMask = !mask.empty;
 
-    T t;
+    Unqual!T t;
     foreach (ref p; prealloc[from .. to])
     {
         if (useMask && mask[i] <= 0)
@@ -288,11 +303,11 @@ body
     }
 }
 
-void handleEdgeConv2d(alias bc, SliceKind kind0, SliceKind kind1, SliceKind kind2, SliceKind kind3, T, K, M)(
+void handleEdgeConv2d(alias bc, SliceKind kind0, SliceKind kind1, SliceKind kind2, SliceKind kind3, T, O, K, M)(
     Slice!(kind0, [2], T*) input,
-    Slice!(kind1, [2], T*) prealloc,
+    Slice!(kind1, [2], O*) prealloc,
     Slice!(kind2, [2], K*) kernel,
-    Slice!(kind3, [2], M*) mask, 
+    Slice!(kind3, [2], M*) mask,
     size_t[2] rowRange, size_t[2] colRange)
 in
 {
@@ -310,7 +325,7 @@ body
 
     auto roi = prealloc[rowRange[0] .. rowRange[1], colRange[0] .. colRange[1]];
 
-    T t;
+    Unqual!T t;
     foreach (prow; roi)
     {
         c = cast(int)colRange[0];
