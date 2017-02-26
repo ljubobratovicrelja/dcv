@@ -134,50 +134,92 @@ body
 }
 
 /**
-Instantiate 2D gaussian kernel.
+Gaussian (2D) mask creation.
+
+Params:
+    size    = Size of the mask.
+    sigmax  = Gaussian variance value on x axis.
+    sigmay  = Gaussian variance value on y axis.
+
+Return:
+    Lazy 2 dimensional slice of gaussian distribution.
+
+Note:
+    Mask is not normalized. To perform gaussian filtering on image, L1 normalization of mask is required.
 */
-Slice!(Contiguous, [2], V*) gaussian(V = double)(V sigma, size_t width, size_t height) pure
+pure @nogc nothrow
+auto gaussian(V = float)(size_t[2] size, V sigmax, V sigmay)
+in
 {
+    assert(size[0] > 2 && size[1] > 2, "Invalid kernel size, should be larger than 2.");
+    assert(size[0] % 2 != 0 && size[1] % 2 != 0, "Invalid kernel size, mask size should be odd.");
+}
+body
+{
+    import mir.ndslice.iterator : FieldIterator;
+    import mir.ndslice.field : ndIotaField;
 
-    static assert(isFloatingPoint!V,
-        "Gaussian kernel can be constructed only using floating point types.");
-
-    enforce(width > 2 && height > 2 && sigma > 0, "Invalid kernel values");
-
-    auto h = uninitializedSlice!V(height, width);
-
-    int arrv_w = -(cast(int)width - 1) / 2;
-    int arrv_h = -(cast(int)height - 1) / 2;
-    float sgm = 2 * (sigma ^^ 2);
-
-    // build rows
-    foreach (r; 0 .. height)
+    static struct GaussianKernel
     {
-        h[r][] = iota!ptrdiff_t([width], arrv_w).map!"a * a";
+        V _sx, _sy, _a, _cx, _cy;
+        ndIotaField!2 _field;
+
+        this(size_t[2] size, V sx, V sy, V a)
+        {
+            _sx = V(2) * sx * sx;
+            _sy = V(2) * sy * sy;
+            _a = a;
+            _cx = cast(V)(size[1] / 2);
+            _cy = cast(V)(size[0] / 2);
+            _field = ndIotaField!2(size[1]);
+        }
+
+        V opIndex(ptrdiff_t index)
+        {
+            import mir.math.internal : exp;
+            auto p = _field[index];
+
+            immutable x = cast(V)p[1] - _cx;
+            immutable y = cast(V)p[0] - _cy;
+            immutable x2 = x*x;
+            immutable y2 = y*y;
+
+            return _a * exp(-((x2/_sx) + (y2/_sy)));
+        }
     }
 
-    // build columns
-    foreach (c; 0 .. width)
-    {
-        h[0 .. height, c][] += iota([width], -arrv_h + 1).map!"a * a";
-        h[0 .. height, c].each!((ref v) => v = exp(-v / sgm));
-    }
+    auto kernel = GaussianKernel
+    (
+        size,
+        sigmax,
+        sigmay,
+        V(1)
+    );
 
-    // normalize
-    import mir.math.sum : sum;
+    return FieldIterator!GaussianKernel(0, kernel).sliced(size);
+}
 
-    h[] /= h.flattened.sum;
+/// ditto
+pure @nogc nothrow
+auto gaussian(V = double)(size_t[2] size, V sigma)
+{
+    return gaussian!V(size, sigma, sigma);
+}
 
-    return h;
+/// ditto
+pure @nogc nothrow
+auto gaussian(V = double)(size_t size, V sigma)
+{
+    return gaussian!V([size, size], sigma, sigma);
 }
 
 unittest
 {
     // TODO: design the test
 
-    auto fg = gaussian!float(1.0, 3, 3);
-    auto dg = gaussian!double(1.0, 3, 3);
-    auto rg = gaussian!real(1.0, 3, 3);
+    auto fg = gaussian!float(3, 1f);
+    auto dg = gaussian!double(3, 1f);
+    auto rg = gaussian!real(3, 1f);
 
     import std.traits;
 
