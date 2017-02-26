@@ -146,6 +146,18 @@ Return:
 
 Note:
     Mask is not normalized. To perform gaussian filtering on image, L1 normalization of mask is required.
+
+Warning:
+    Given kernel is lazy, i.e. is evaluated on indexing. For convolution use, it is advised to pre-calculate values.
+
+Example:
+====
+import mir.ndslice.allocation : slice;
+import dcv.imgproc.filter : gaussian;
+
+auto mask = gaussian!float(5, 1f) // create 5x5 mask, with x and y sigma of 1
+                         .slice;  // evaluate mask values, and copy to a variable.
+====
 */
 pure @nogc nothrow
 auto gaussian(V = float)(size_t[2] size, V sigmax, V sigmay)
