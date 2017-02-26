@@ -105,7 +105,7 @@ int main(string[] args)
     Image frame;
     Slice!(Contiguous, [2], float*) prevFrame, thisFrame; // image frames, for tracking
 
-    auto cornerW = args.length >= 4 ? args[3].to!size_t: 15; // size of the tracking kernel
+    auto cornerW = args.length >= 4 ? args[3].to!int : 15; // size of the tracking kernel
     auto cornerCount = args.length >= 5 ? args[4].to!uint : 10; // numer of corners tracked
     auto frames = args.length >= 6 ? args[5].to!uint : 100; // maximum frame count to be tracked
     auto pyrLevels = args.length >= 7 ? args[6].to!uint : 3; // number of levels in the optical flow pyramid
@@ -115,8 +115,8 @@ int main(string[] args)
     // initialize and setup the optical flow algorithm
     LucasKanadeFlow!(float, float) lkFlow;
     lkFlow.sigma = 2.80f;
-    lkFlow.windowSize[] = cornerW;
     lkFlow.iterationCount = iterCount;
+    lkFlow.setWindowSize(cornerW);
 
     //SparsePyramidFlow spFlow = new SparsePyramidFlow(lkFlow, pyrLevels);
 
@@ -141,6 +141,8 @@ int main(string[] args)
 
         // take the y channel, and form an image of it.
         thisFrame = frame.sliced[0 .. $, 0 .. $, 0].as!float.slice;
+
+        errors = slice!float(corners.length);
 
         // evaluate the optical flow
         lkFlow.evaluate(prevFrame, thisFrame, corners, tracked, errors);
