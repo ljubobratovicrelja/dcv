@@ -301,6 +301,7 @@ version (unittest)
                 .iota.map!(v => cast(ubyte)uniform(0, 255)).array);
     }
 
+    /*
     class DummySparseFlow : SparseOpticalFlow
     {
         override float[2][] evaluate(inout Image f1, inout Image f2, in float[2][] points,
@@ -311,6 +312,7 @@ version (unittest)
             return uninitializedArray!(float[2][])(points.length);
         }
     }
+    */
 
     class DummyDenseFlow : DenseOpticalFlow
     {
@@ -324,6 +326,7 @@ version (unittest)
 
 unittest
 {
+    /*
     SparsePyramidFlow flow = new SparsePyramidFlow(new DummySparseFlow, 3);
     auto f1 = createImage();
     auto f2 = createImage();
@@ -331,6 +334,7 @@ unittest
     auto r = 10.iota.map!(v => cast(float[2])[3.0f, 3.0f]).array;
     auto f = flow.evaluate(f1, f2, p, r);
     assert(f.length == p.length);
+    */
 }
 
 unittest
