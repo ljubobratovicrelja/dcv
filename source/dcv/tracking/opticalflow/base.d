@@ -58,7 +58,7 @@ mixin template SparseOpticalFlow(PixelType, CoordType)
         if (up)
             assert(currPoints.shape == prevPoints.shape, "Invalid destination frame shape - should be same as previous.");
         if(!error.empty)
-            assert(error.length != prevPoints.length, "If errors are to be calculated, error slice has to be of same size as points.");
+            assert(error.length == prevPoints.length, "If errors are to be calculated, error slice has to be of same size as points.");
     }
     body
     {
