@@ -11,13 +11,19 @@ License: $(LINK3 http://www.boost.org/LICENSE_1_0.txt, Boost Software License - 
 module dcv.tracking.opticalflow.lucaskanade;
 
 import std.typecons : Flag, No;
-import std.math : PI, floor;
+import std.traits : isFloatingPoint;
 
 import mir.ndslice.slice : Slice, Contiguous, Canonical;
 import mir.ndslice.topology : map, windows;
-import mir.ndslice.allocation : slice;
+import mir.ndslice.allocation : slice, makeSlice;
 
 import dcv.tracking.opticalflow.base;
+
+enum LucasKanadeError
+{
+    brightness,
+    eigenvalue
+}
 
 /**
 Lucas-Kanade optical flow method implementation.
@@ -26,10 +32,66 @@ struct LucasKanadeFlow(PixelType, CoordType)
 {
     mixin SparseOpticalFlow!(PixelType, CoordType);
 
-    float sigma = 0.84f;
-    float[] cornerResponse;
-    size_t iterationCount = 10;
-    size_t[2] windowSize = [41, 41];
+    private
+    {
+        float _sigma = 0.84f;
+        size_t _iters = 10;
+        int[2] _win = [41, 41];
+        LucasKanadeError _error;
+    }
+
+    @property
+    {
+        ///
+        float sigma() { return _sigma; }
+        ///
+        size_t iterationCount() { return _iters; }
+        ///
+        int[2] windowSize() const { return _win; }
+        ///
+        ref errorMethod() { return _error; }
+
+        ///
+        void sigma(float value)
+        in
+        {
+            assert(value > 0, "Invalid sigma value - should be larger than 0.");
+        }
+        body
+        {
+            _sigma = value;
+        }
+
+        ///
+        void iterationCount(size_t value)
+        in
+        {
+            assert(value > 0, "Invalid iteration count - should be larger than 0.");
+        }
+        body
+        {
+            _iters = value;
+        }
+    }
+
+    /// Set window size.
+    void setWindowSize(int rows, int cols)
+    in
+    {
+        assert(rows >= 3 && cols >= 3, "Minimal size for the window side is 3.");
+        assert(rows % 2 != 0 && cols % 2 != 0, "Window size should be odd.");
+    }
+    body
+    {
+        _win[0] = rows;
+        _win[1] = cols;
+    }
+
+    /// ditto
+    void setWindowSize(int size)
+    {
+        setWindowSize(size, size);
+    }
 
     nothrow @nogc
     void evaluateImpl
@@ -41,7 +103,15 @@ struct LucasKanadeFlow(PixelType, CoordType)
         Slice!(Contiguous, [1], float*) error
     )
     {
+        import std.math : PI;
+        import std.experimental.allocator.mallocator : Mallocator;
+        import std.algorithm.iteration : sum;
+
+        import mir.math.internal : floor, sqrt, exp;
+        import mir.ndslice.topology : flattened;
+
         import dcv.imgproc.interpolate : linear;
+        import dcv.imgproc.filter : gaussian;
 
         alias T = CoordType;
 
@@ -62,23 +132,32 @@ struct LucasKanadeFlow(PixelType, CoordType)
         immutable cl = cast(int)(cols - 1);
         immutable pointCount = prevPoints.length;
         immutable pixelCount = rows * cols;
+        immutable calcError = !error.empty;
+        immutable wwh = _win[0] / 2, whh = _win[1] / 2;
 
-        T gaussMul = 1.0f / (2.0f * PI * sigma);
-        T gaussDel = 2.0f * (sigma ^^ 2);
+        auto gaussBuf = makeSlice!T(Mallocator.instance, _win[0], _win[1]);
+        scope(exit) { Mallocator.instance.deallocate(gaussBuf.array); }
+
+        auto gauss = gaussBuf.slice;
+        gauss[] = gaussian!T([cast(size_t)_win[0], cast(size_t)_win[0]], sigma, sigma);
+
+        // TODO: norm1 from mir?
+        auto gnorm = gauss.flattened.sum;
+        gauss[] /= gnorm;
 
         auto fxs = f1.windows(3, 3).map!sobel_x;
         auto fys = f1.windows(3, 3).map!sobel_y;
 
-        foreach (ptn; 0 .. pointCount)
+        T a1, a2, a3, b1, b2;
+
+        foreach (ptn; 0 .. pointCount) // TODO: solve in parallel
         {
-            import std.math : sqrt, exp;
-
             auto p = prevPoints[ptn];
-
-            auto rb = cast(int)(p[1] - windowSize[0] / 2.0f);
-            auto re = cast(int)(p[1] + windowSize[0] / 2.0f);
-            auto cb = cast(int)(p[0] - windowSize[1] / 2.0f);
-            auto ce = cast(int)(p[0] + windowSize[1] / 2.0f);
+            int
+                rb = cast(int)p[1] - wwh,
+                re = cast(int)p[1] + wwh + 1,
+                cb = cast(int)p[0] - whh,
+                ce = cast(int)p[0] + whh + 1;
 
             rb = rb < 1 ? 1 : rb;
             re = re > rl ? rl : re;
@@ -90,31 +169,24 @@ struct LucasKanadeFlow(PixelType, CoordType)
                 continue;
             }
 
-            T a1, a2, a3;
-            T b1, b2;
-
             a1 = 0.0f;
             a2 = 0.0f;
             a3 = 0.0f;
             b1 = 0.0f;
             b2 = 0.0f;
 
-            const auto rm = floor(cast(T)re - (windowSize[0] / 2.0f));
-            const auto cm = floor(cast(T)ce - (windowSize[1] / 2.0f));
-
             foreach (iteration; 0 .. iterationCount)
             {
                 immutable nx = currPoints[ptn, 0] - p[0];
                 immutable ny = currPoints[ptn, 1] - p[1];
 
+                size_t ii = 0, jj;
                 foreach (i; rb .. re)
+                {
+                    jj = 0;
                     foreach (j; cb .. ce)
                     {
-                        // TODO: gaussian weighting produces errors - examine
-                        auto dx = cm - cast(int)j;
-                        auto dy = rm - cast(int)i;
-
-                        auto w = exp(-( (dx*dx + dy*dy) / gaussDel ));
+                        auto w = gauss[ii, jj];
 
                         immutable nnx = cast(T)j + nx;
                         immutable nny = cast(T)i + ny;
@@ -122,8 +194,7 @@ struct LucasKanadeFlow(PixelType, CoordType)
                         if (nnx < 0 || nnx >= cols || nny < 0 || nny >= rows)
                             continue;
 
-                        // TODO: consider subpixel precision for gradient sampling.
-                        immutable fx = fxs[i-1, j-1];
+                        immutable fx = fxs[i-1, j-1]; // -1 because of shift by sobel convolution kernel size
                         immutable fy = fys[i-1, j-1];
                         immutable ft = linear(f2, nny, nnx) - f1[i, j];
 
@@ -137,10 +208,10 @@ struct LucasKanadeFlow(PixelType, CoordType)
 
                         b1 += w * fx * ft;
                         b2 += w * fy * ft;
+                        ++jj;
                     }
-
-                // TODO: consider resp normalization...
-                //cornerResponse[ptn] = ((a1 + a3) - sqrt((a1 - a3) * (a1 - a3) + a2 * a2));
+                    ++ii;
+                }
 
                 auto d = (a1 * a3 - a2 * a2);
 
@@ -151,24 +222,68 @@ struct LucasKanadeFlow(PixelType, CoordType)
                     currPoints[ptn, 1] += (a2 * b1 - a1 * b2) * d;
                 }
             }
+
+            if (calcError)
+            {
+                float n = cast(float)(_win[0]*_win[1]);
+                error[ptn] = ((a1 + a3) - sqrt((a1 - a3) * (a1 - a3) + a2 * a2)) / n;
+            }
         }
     }
+}
 
-    static nothrow @nogc
+nothrow @nogc static
+{
+    /*
+    auto calcEigenvalueError(GWin)(GWin fxs, GWin fys, 
     {
-        auto sobel_x(Slice!(Canonical, [2], const(CoordType)*) window)
-        {
-            return     (window[0, 2] - window[0, 0]) +
-                   2 * (window[1, 2] - window[1, 0]) +
-                       (window[2, 2] - window[2, 0]);
-        }
+        immutable nx = currPoints[ptn, 0] - p[0];
+        immutable ny = currPoints[ptn, 1] - p[1];
 
-        auto sobel_y(Slice!(Canonical, [2], const(CoordType)*) window)
-        {
-            return     (window[2, 0] - window[0, 0]) +
-                   2 * (window[2, 1] - window[0, 1]) +
-                       (window[2, 2] - window[0, 2]);
-        }
+        foreach (i; rb .. re)
+            foreach (j; cb .. ce)
+                {
+                auto dx = cm - cast(int)j;
+                auto dy = rm - cast(int)i;
+
+                auto w = exp(-( (dx*dx + dy*dy) / gaussDel ));
+
+                immutable nnx = cast(T)j + nx;
+                immutable nny = cast(T)i + ny;
+
+                if (nnx < 0 || nnx >= cols || nny < 0 || nny >= rows)
+                    continue;
+
+                immutable fx = fxs[i-1, j-1];
+                immutable fy = fys[i-1, j-1];
+                immutable ft = linear(f2, nny, nnx) - f1[i, j];
+
+                immutable fxx = fx * fx;
+                immutable fyy = fy * fy;
+                immutable fxy = fx * fy;
+
+                a1 += w * fxx;
+                a2 += w * fxy;
+                a3 += w * fyy;
+
+                b1 += w * fx * ft;
+                b2 += w * fy * ft;
+            }
+    }
+    */
+
+    auto sobel_x(T)(Slice!(Canonical, [2], const(T)*) window)
+    {
+        return (window[0, 2] - window[0, 0]) +
+           2 * (window[1, 2] - window[1, 0]) +
+               (window[2, 2] - window[2, 0]);
+    }
+
+    auto sobel_y(T)(Slice!(Canonical, [2], const(T)*) window)
+    {
+        return (window[2, 0] - window[0, 0]) +
+           2 * (window[2, 1] - window[0, 1]) +
+               (window[2, 2] - window[0, 2]);
     }
 }
 
