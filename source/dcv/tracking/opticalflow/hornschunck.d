@@ -125,7 +125,7 @@ class HornSchunckFlow : DenseOpticalFlow
             import dcv.imgproc.convolution;
             import dcv.core.utils : neumann;
 
-            auto g = gaussian!float(props.gaussSigma, props.gaussKernelSize, props.gaussKernelSize);
+            auto g = gaussian!float(props.gaussKernelSize, props.gaussSigma).slice;
 
             current = conv!(float, neumann)(current, g);
             next = conv!(float, neumann)(next, g);
