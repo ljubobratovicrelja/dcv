@@ -153,6 +153,7 @@ struct LucasKanadeFlow(PixelType, CoordType)
         foreach (ptn; 0 .. pointCount) // TODO: solve in parallel
         {
             auto p = prevPoints[ptn];
+
             int
                 rb = cast(int)p[1] - wwh,
                 re = cast(int)p[1] + wwh + 1,
@@ -160,20 +161,16 @@ struct LucasKanadeFlow(PixelType, CoordType)
                 ce = cast(int)p[0] + whh + 1;
 
             rb = rb < 1 ? 1 : rb;
-            re = re > rl ? rl : re;
+            re = re >= rl - 1 ? rl - 2 : re;
             cb = cb < 1 ? 1 : cb;
-            ce = ce > cl ? cl : ce;
+            ce = ce >= cl - 1 ? cl - 2 : ce;
 
             if (re - rb <= 0 || ce - cb <= 0)
             {
                 continue;
             }
 
-            a1 = 0.0f;
-            a2 = 0.0f;
-            a3 = 0.0f;
-            b1 = 0.0f;
-            b2 = 0.0f;
+            a1 = a2 = a3 = b1 = b2 = 0.0f;
 
             foreach (iteration; 0 .. iterationCount)
             {
@@ -234,44 +231,6 @@ struct LucasKanadeFlow(PixelType, CoordType)
 
 nothrow @nogc static
 {
-    /*
-    auto calcEigenvalueError(GWin)(GWin fxs, GWin fys, 
-    {
-        immutable nx = currPoints[ptn, 0] - p[0];
-        immutable ny = currPoints[ptn, 1] - p[1];
-
-        foreach (i; rb .. re)
-            foreach (j; cb .. ce)
-                {
-                auto dx = cm - cast(int)j;
-                auto dy = rm - cast(int)i;
-
-                auto w = exp(-( (dx*dx + dy*dy) / gaussDel ));
-
-                immutable nnx = cast(T)j + nx;
-                immutable nny = cast(T)i + ny;
-
-                if (nnx < 0 || nnx >= cols || nny < 0 || nny >= rows)
-                    continue;
-
-                immutable fx = fxs[i-1, j-1];
-                immutable fy = fys[i-1, j-1];
-                immutable ft = linear(f2, nny, nnx) - f1[i, j];
-
-                immutable fxx = fx * fx;
-                immutable fyy = fy * fy;
-                immutable fxy = fx * fy;
-
-                a1 += w * fxx;
-                a2 += w * fxy;
-                a3 += w * fyy;
-
-                b1 += w * fx * ft;
-                b2 += w * fy * ft;
-            }
-    }
-    */
-
     auto sobel_x(T)(Slice!(Canonical, [2], const(T)*) window)
     {
         return (window[0, 2] - window[0, 0]) +
