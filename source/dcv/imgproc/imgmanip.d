@@ -26,7 +26,8 @@ import std.range.primitives : ElementType;
 import std.traits;
 
 import dcv.core.utils;
-public import dcv.imgproc.interpolate;
+import dcv.core.types;
+import dcv.imgproc.interpolate;
 
 import mir.ndslice.slice;
 import mir.ndslice.topology;
@@ -34,48 +35,116 @@ import mir.ndslice.topology;
 /**
 Resize array using custom interpolation function.
 
-Primarilly implemented as image resize. 
+Primarilly implemented as image resize.
 1D, 2D and 3D arrays are supported, where 3D array is
-treated as channeled image - each channel is interpolated 
+treated as channeled image - each channel is interpolated
 as isolated 2D array (matrix).
 
-Interpolation function is given as a template parameter. 
+Interpolation function is given as a template parameter.
 Default interpolation function is linear. Custom interpolation
 function can be implemented in the 3rd party code, by following
 interpolation function rules in dcv.imgproc.interpolation.
 
 Params:
-    slice = Slice to an input array.
-    newsize = tuple that defines new shape. New dimension has to be
-    the same as input slice in the 1D and 2D resize, where in the 
-    3D resize newsize has to be 2D.
-    pool = Optional TaskPool instance used to parallelize computation.
+    input   = Slice to an input array.
+    newSize = Resulting size. New dimension has to be
+              the same as input slice in the 1D and 2D resize, where in the
+              3D resize newsize has to be 2D.
 
 TODO: consider size input as array, and add prealloc
 */
-Slice!(SliceKind.contiguous, packs, V*) resize(alias interp = linear, SliceKind kind, size_t[] packs, V, size_t SN)(Slice!(kind, packs, V*) slice, size_t[SN] newsize, TaskPool pool = taskPool)
-    if (packs.length == 1)
-    //if (isInterpolationFunc!interp)
+nothrow @nogc pure
+auto resize(alias interp = linear, SliceKind kind, Iterator, size_t[] packs, size_t M)
+(
+    Slice!(kind, packs, Iterator) input,
+    size_t[M] newSize
+)
+in
 {
-    static if (packs[0] == 1)
+    foreach(s; newSize)
+        assert(s > 0, "Invalid new size - sizes should be larger than zero.");
+    assert(!input.empty, "Input image should not be empty.");
+}
+body
+{
+    import mir.ndslice.field;
+    import mir.ndslice.iterator;
+
+    static assert(packs.length == 1, "Packed slices are not supported.");
+
+    enum N = packs[0];
+
+    enum invDimMsg = "Invalid new size dimensionality.";
+    static if (N == 1)
+        static assert(M == 1, invDimMsg);
+    else static if (N == 2)
+        static assert(M == 2, invDimMsg);
+    else static if (N == 3)
+        static assert(M == 2, invDimMsg);
+    else
+        static assert(0, "Invalid input slice dimensionality.");
+
+    static struct Resizer
     {
-        static assert(SN == 1, "Invalid new-size setup - dimension does not match with input slice.");
-        return resizeImpl_1!interp(slice, newsize[0], pool);
+        Slice!(kind, packs, Iterator) _source;
+
+        ndIotaField!N _field;
+        float[M] _ratios;
+
+        auto opIndex(size_t index)
+        {
+            auto i = _field[index];
+            static if (N == 1)
+                return interp(_source, cast(float)i[0] / _ratios[0]);
+            else static if (N == 2)
+                return interp(_source, cast(float)i[0] / _ratios[0], cast(float)i[1] / _ratios[1]);
+            else static if (N == 3)
+                return interp(_source, cast(float)i[0] / _ratios[0], cast(float)i[1] / _ratios[1], cast(float)i[2]);
+        }
     }
-    else static if (packs[0] == 2)
+
+    float[M] ratios;
+    foreach(I; 0 .. M)
     {
-        static assert(SN == 2, "Invalid new-size setup - dimension does not match with input slice.");
-        return resizeImpl_2!interp(slice, newsize[0], newsize[1], pool);
+        ratios[I] = cast(float)(newSize[I] - 1) / cast(float)(input.shape[I] - 1);
     }
-    else static if (packs[0] == 3)
+
+    static if (N == 3)
     {
-        static assert(SN == 2, "Invalid new-size setup - 3D resize is performed as 2D."); // TODO: find better way to say this...
-        return resizeImpl_3!interp(slice, newsize[0], newsize[1], pool);
+        auto resizer = Resizer(input, ndIotaField!N([newSize[$-1], input.length!2]), ratios);
+        return FieldIterator!Resizer(0, resizer).sliced(newSize[0], newSize[1], input.length!2);
     }
     else
     {
-        static assert(0, "Resize is not supported for slice with " ~ N.stringof ~ " dimensions.");
+        auto resizer = Resizer(input, ndIotaField!N(newSize[$-1]), ratios);
+        return FieldIterator!Resizer(0, resizer).sliced(newSize);
     }
+}
+
+nothrow @nogc
+void resize(alias interp = linear, SliceKind inKind, SliceKind outKind, InputIterator, OutputIterator, size_t[] packs)
+(
+    Slice!(inKind, packs, InputIterator) input,
+    Slice!(outKind, packs, OutputIterator) output
+)
+in
+{
+    static if (packs[0] == 3)
+        assert(input.length!2 == output.length!2, "Channel count for channeled images must be the same.");
+    assert(!input.empty, "Input image should not be empty.");
+    assert(!output.empty, "Output image should not be empty.");
+}
+body
+{
+    static assert(packs.length == 1, "Packed slices are not supported.");
+    enum N = packs[0];
+
+    static if (N == 3)
+        output[] = input.resize([output.length!0, output.length!1]);
+    else static if (N == 1 || N == 2)
+        output[] = input.resize(output.shape);
+    else
+        static assert(0, "Unsupported dimensionality - 1, 2, and 3 dimensional slice resize is implemented.");
 }
 
 unittest
@@ -100,44 +169,44 @@ unittest
 /**
 Scale array size using custom interpolation function.
 
-Implemented as convenience function which calls resize 
+Implemented as convenience function which calls resize
 using scaled shape of the input slice as:
 
 $(D_CODE scaled = resize(input, input.shape*scale))
 
  */
-Slice!(kind, packs, V*) scale(alias interp = linear, V, ScaleValue, SliceKind kind, size_t[] packs, size_t SN)(Slice!(kind, packs, V*) slice, ScaleValue[SN] scale, TaskPool pool = taskPool)
-        if (isFloatingPoint!ScaleValue && isInterpolationFunc!interp)
+nothrow @nogc pure
+auto scale(alias interp = linear, SliceKind kind, Iterator, size_t[] packs, size_t M)
+(
+    Slice!(kind, packs, Iterator) input,
+    float[M] factors
+)
+in
 {
-    foreach (v; scale)
-        assert(v > 0., "Invalid scale values (v > 0.0)");
+    foreach(f; factors)
+    {
+        assert(f > 0f, "Invalid scaling factor - should be larger than 0.");
+    }
+}
+body
+{
+    static assert(packs.length == 1, "Packed slices are not supported.");
+    enum N = packs[0];
 
-    static if (packs[0] == 1)
-    {
-        static assert(SN == 1, "Invalid scale setup - dimension does not match with input slice.");
-        size_t newsize = cast(size_t)(slice.length * scale[0]);
-        enforce(newsize > 0, "Scaling value invalid - after scaling array size is zero.");
-        return resizeImpl_1!interp(slice, newsize, pool);
-    }
-    else static if (packs[0] == 2)
-    {
-        static assert(SN == 2, "Invalid scale setup - dimension does not match with input slice.");
-        size_t [2]newsize = [cast(size_t)(slice.length!0 * scale[0]), cast(size_t)(slice.length!1 * scale[1])];
-        enforce(newsize[0] > 0 && newsize[1] > 0, "Scaling value invalid - after scaling array size is zero.");
-        return resizeImpl_2!interp(slice, newsize[0], newsize[1], pool);
-    }
-    else static if (packs[0] == 3)
-    {
-        static assert(SN == 2, "Invalid scale setup - 3D scale is performed as 2D."); // TODO: find better way to say this...
-        size_t [2]newsize = [cast(size_t)(slice.length!0 * scale[0]), cast(size_t)(slice.length!1 * scale[1])];
-        enforce(newsize[0] > 0 && newsize[1] > 0, "Scaling value invalid - after scaling array size is zero.");
-        return resizeImpl_3!interp(slice, newsize[0], newsize[1], pool);
-    }
+    static if (N == 1)
+        size_t[1] newSize = [input.length!0 * factors[0]];
+    else static if (N == 2 || N == 3)
+        size_t[2] newSize = [input.length!0 * factors[0], input.length!1 * factors[1]];
     else
+        static assert(0, "Scaling not supported for given dimensionality.");
+
+    foreach(s; newSize)
     {
-        import std.conv : to;
-        static assert(0, "Resize is not supported for slice with " ~ N.to!string ~ " dimensions.");
+        assert(s > 0, "Invalid scaling factor - target size must be larger than 0."); // TODO: Should not be checked always.
+        return typeof(input).init;
     }
+
+    return resize(input, newSize);
 }
 
 unittest
@@ -498,23 +567,6 @@ unittest
 private:
 
 // 1d resize implementation
-Slice!(SliceKind.contiguous, [1], V*) resizeImpl_1(alias interp, V)(Slice!(SliceKind.contiguous, [1], V*) slice, size_t newsize, TaskPool pool)
-{
-
-    enforce(!slice.empty && newsize > 0);
-
-    auto retval = new V[newsize];
-    auto resizeRatio = cast(float)(newsize - 1) / cast(float)(slice.length - 1);
-
-    foreach (i; pool.parallel(newsize.iota))
-    {
-        retval[i] = interp(slice, cast(float)i / resizeRatio);
-    }
-
-    return retval.sliced(newsize);
-}
-
-// 1d resize implementation
 Slice!(SliceKind.contiguous, [2], V*) resizeImpl_2(alias interp, SliceKind kind, V)(Slice!(kind, [2], V*) slice, size_t height, size_t width, TaskPool pool)
 {
 
@@ -538,6 +590,22 @@ Slice!(SliceKind.contiguous, [2], V*) resizeImpl_2(alias interp, SliceKind kind,
     }
 
     return retval;
+}
+// 1d resize implementation
+Slice!(SliceKind.contiguous, [1], V*) resizeImpl_1(alias interp, V)(Slice!(SliceKind.contiguous, [1], V*) slice, size_t newsize, TaskPool pool)
+{
+
+    enforce(!slice.empty && newsize > 0);
+
+    auto retval = new V[newsize];
+    auto resizeRatio = cast(float)(newsize - 1) / cast(float)(slice.length - 1);
+
+    foreach (i; pool.parallel(newsize.iota))
+    {
+        retval[i] = interp(slice, cast(float)i / resizeRatio);
+    }
+
+    return retval.sliced(newsize);
 }
 
 // 1d resize implementation
