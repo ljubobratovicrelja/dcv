@@ -54,18 +54,14 @@ Perform convolution to given tensor, using given kernel.
 Convolution is supported for 1, 2, and 3 dimensional tensors.
 
 Params:
-    bc = (Template parameter) Boundary Condition function used while indexing the image matrix.
-    input = Input tensor.
-    kernel = Convolution kernel tensor. For 1D input, 1D kernel is expected.
-    For 2D input, 2D kernel is expected. For 3D input, 2D or 3D kernel is expected -
-    if 2D kernel is given, each item in kernel matrix is applied to each value in
-    corresponding 2D coordinate in the input.
-    prealloc = Pre-allocated buffer where convolution result can be stored. Default
-    value is emptySlice, where resulting array will be newly allocated. Also if
-    prealloc is not of same shape as input input, resulting array will be newly allocated.
-    mask = Masking input. Convolution will skip each element where mask is 0. Default value
-    is empty slice, which tells that convolution will be performed on the whole input.
-    pool = Optional TaskPool instance used to parallelize computation.
+    bc          = (Template parameter) Boundary Condition function used while indexing the image matrix.
+    input       = Input tensor.
+    output      = Pre-allocated buffer where convolution result will be stored. Must be the same size as the input tensor.
+    kernel      = Convolution kernel tensor. For 1D input, 1D kernel is expected. For 2D input, 2D kernel is expected.
+                  For 3D input, 2D or 3D kernel is expected - if 2D kernel is given, each item in kernel matrix is applied
+                  to each value in corresponding 2D coordinate in the input.
+    mask        = Masking input. Convolution will skip each element where mask is 0. Default value is empty slice, which
+                  tells that convolution will be performed on the whole input.
 
 Returns:
     Resulting image after convolution, of same type as input tensor.
@@ -73,13 +69,14 @@ Returns:
 Note:
     Input, mask and pre-allocated slices' strides must be the same.
 */
-auto conv(OutputType = float, alias bc = neumann, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType = ubyte)
+nothrow @nogc
+void conv(OutputType = float, alias bc = neumann, SliceKind k1, SliceKind k2, SliceKind k3 = Contiguous, size_t[] packs,
+    size_t[] kPacks, InputIterator, KernelIterator, MaskType = ubyte)
 (
-    Slice!(Contiguous, packs, InputIterator) input,
-    Slice!(Contiguous, kPacks, KernelIterator) kernel,
-    Slice!(Contiguous, packs, OutputType*) prealloc = Slice!(Contiguous, packs, OutputType*).init,
-    Slice!(Contiguous, kPacks, MaskType*) mask = Slice!(Contiguous, kPacks, MaskType*).init,
-    TaskPool pool = taskPool
+    Slice!(k1, packs, InputIterator) input,
+    Slice!(k1, packs, OutputType*) output,
+    Slice!(k2, kPacks, KernelIterator) kernel,
+    Slice!(k3, kPacks, MaskType*) mask = Slice!(k3, kPacks, MaskType*).init
 )
 in
 {
@@ -101,7 +98,8 @@ in
     else
         static assert(0, "Convolution not implemented for given tensor dimension.");
 
-    assert(input._iterator != prealloc._iterator, "Preallocated and input buffer cannot point to the same memory.");
+    assert(input._iterator != output._iterator, "Output and input buffer cannot point to the same memory.");
+    assert(output.shape == input.shape, "Output buffer size should be the same as the input");
 
     if (!mask.empty)
     {
@@ -109,20 +107,82 @@ in
         assert(input.strides == mask.strides, "Input input and mask need to have same strides.");
     }
 
-    if (prealloc.empty)
-        assert(input._stride!(N-1) == 1, "Input tensor has to be contiguous (i.e. input.stride!(N-1) == 1).");
-    else
-        assert(input.strides == prealloc.strides,
-                "Input input and result(preallocated) buffer need to have same strides.");
+    static if (k1 != Contiguous)
+    {
+        assert(input._strides == output._strides, "Input and output strides must be the same.");
+    }
 }
 body
 {
-    import mir.ndslice.allocation;
+    convImpl!(OutputType, bc)(input, output, kernel, mask);
+}
 
-    if (prealloc.shape != input.shape)
-        prealloc = uninitializedSlice!OutputType(input.shape);
+/**
+Pure, lazy variant of convolution.
 
-    return convImpl!(OutputType, bc)(input, kernel, prealloc, mask, pool);
+Constructs lazy slice, containing evaluation of convolution using the given kernel at each tensor coefficient.
+
+Note:
+    Border handing is ignored in this variant of convolution, as result giving smaller sized tensor, by the size of the
+    kernel.
+
+Params:
+    input   = Input tensor.
+    kernel  = Kernel used for convolution.
+
+Result:
+    Slice object containing lazy evaluated convolution.
+*/
+pure nothrow @nogc
+auto conv(OutputType = float, SliceKind kind, size_t[] packs, InputIterator, SliceKind kKind, size_t[] kPacks, KernelIterator)
+(
+    Slice!(kind, packs, InputIterator) input,
+    Slice!(kKind, kPacks, KernelIterator) kernel,
+)
+in
+{
+    assert(!input.empty, "Input image must not be empty.");
+    assert(kernel.length!0 > 1 && kernel.length!1 > 1, "Given kernel side size must be at least 2 pixels.");
+}
+body
+{
+    import mir.ndslice.iterator : FieldIterator;
+    import mir.ndslice.field : ndIotaField;
+    import mir.ndslice.algorithm : reduce;
+
+    static assert(packs.length == 1 && kPacks.length == 1, "Packed slices are not supported.");
+
+    enum N = packs[0];
+    enum M = kPacks[0];
+
+    alias Input = typeof(input);
+    alias Kernel = typeof(kernel);
+
+    immutable r = kernel.length!0 / 2;
+    immutable c = kernel.length!1 / 2;
+
+    static struct ConvOp
+    {
+        Input _input;
+        Kernel _kernel;
+        ndIotaField!N _field;
+
+        auto opIndex(size_t index)
+        {
+            immutable r = _kernel.length!0 / 2;
+            immutable c = _kernel.length!1 / 2;
+            auto i = _field[index];
+            static if (N == 2)
+                auto w = _input[i[0]-r..i[0]+r+1, i[1]-c..i[1]+c+1];
+            else
+                auto w = _input[i[0]-r..i[0]+r+1, i[1]-c..i[1]+c+1, i[2]];
+
+            return reduce!kapply(OutputType(0), w, _kernel);
+        }
+    }
+
+    auto convOp = ConvOp(input, kernel, ndIotaField!N(input.shape[1..$]));
+    return FieldIterator!ConvOp(0, convOp).sliced(input.shape)[r..$-r, c..$-c];
 }
 
 unittest
@@ -159,13 +219,15 @@ nothrow @nogc @fastmath auto kapply(T)(const T r, const T i, const T k)
 
 private:
 
-auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+@nogc nothrow
+auto convImpl(OutputType, alias bc,
+SliceKind k1, SliceKind k2, SliceKind k3,
+size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
 (
-    Slice!(Contiguous, packs, InputIterator) input,
-    Slice!(Contiguous, kPacks, KernelIterator) kernel,
-    Slice!(Contiguous, packs, OutputType*) prealloc,
-    Slice!(Contiguous, kPacks, MaskType*) mask,
-    TaskPool pool = taskPool
+    Slice!(k1, packs, InputIterator) input,
+    Slice!(k1, packs, OutputType*) output,
+    Slice!(k2, kPacks, KernelIterator) kernel,
+    Slice!(k3, kPacks, MaskType*) mask
 )
 if (packs[0] == 1)
 {
@@ -176,8 +238,8 @@ if (packs[0] == 1)
 
     if (mask.empty)
     {
-        auto packedWindows = zip!true(prealloc, input).windows(kl);
-        foreach (p; pool.parallel(packedWindows))
+        auto packedWindows = zip!true(output, input).windows(kl);
+        foreach (p; packedWindows)
         {
             p[kh].a = reduce!(kapply!InputType)(0.0f, p.unzip!'b', kernel);
         }
@@ -185,27 +247,29 @@ if (packs[0] == 1)
     else
     {
         // TODO: extract masked convolution as separate function?
-        auto packedWindows = zip!true(prealloc, input, mask).windows(kl);
-        foreach (p; pool.parallel(packedWindows))
+        auto packedWindows = zip!true(output, input, mask).windows(kl);
+        foreach (p; packedWindows)
         {
             if (p[$ / 2].c)
                 p[$ / 2].a = reduce!(kapply!InputType)(0.0f, p.unzip!'b', kernel);
         }
     }
 
-    handleEdgeConv1d!bc(input, prealloc, kernel, mask, 0, kl);
-    handleEdgeConv1d!bc(input, prealloc, kernel, mask, input.length - 1 - kh, input.length);
+    handleEdgeConv1d!bc(input, output, kernel, mask, 0, kl);
+    handleEdgeConv1d!bc(input, output, kernel, mask, input.length - 1 - kh, input.length);
 
-    return prealloc;
+    return output;
 }
 
-auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+/*
+@nogc nothrow
+auto convImpl(OutputType, alias bc, SliceKind k1, SliceKind k2, SliceKind k3, size_t[] packs,
+    size_t[] kPacks, InputIterator, KernelIterator, MaskType)
 (
-    Slice!(Contiguous, packs, InputIterator) input,
-    Slice!(Contiguous, kPacks, KernelIterator) kernel,
-    Slice!(Contiguous, packs, OutputType*) prealloc,
-    Slice!(Contiguous, kPacks, MaskType*) mask,
-    TaskPool pool = taskPool
+    Slice!(k1, packs, InputIterator) input,
+    Slice!(k1, packs, OutputType*) output,
+    Slice!(k2, kPacks, KernelIterator) kernel,
+    Slice!(k3, kPacks, MaskType*) mask
 )
 if (packs[0] == 2)
 {
@@ -219,8 +283,78 @@ if (packs[0] == 2)
 
     if (mask.empty)
     {
-        auto packedWindows = zip!true(prealloc, input).windows(krs, kcs);
-        foreach (prow; pool.parallel(packedWindows))
+        auto packedWindows = zip!true(output, input).windows(krs, kcs);
+        foreach (prow; packedWindows)
+            foreach (p; prow)
+            {
+                p[krh, kch].a = reduce!kapply(0.0f, p.unzip!'b', kernel);
+            }
+    }
+
+    foreach (r; iota(inShape[0]))
+    {
+        auto maskBuf = threadMask.get();
+        foreach (c; 0 .. inShape[1])
+        {
+            innerBody[r, c] = bilateralFilterImpl(inputWindows[r, c], maskBuf, sigmaCol, sigmaSpace);
+        }
+    }
+
+    foreach (border; input.shape.borders(ks)[])
+    {
+        auto maskBuf = threadMask.get();
+        foreach (r; border.rows)
+            foreach (c; border.cols)
+            {
+                import mir.ndslice.field;
+                import mir.ndslice.iterator;
+
+                static struct ndIotaWithShiftField
+                {
+                    ptrdiff_t[2] _shift;
+                    ndIotaField!2 _field;
+                    Slice!(kind, [2], Iterator) _input;
+                    auto opIndex(ptrdiff_t index)
+                    {
+                        auto ret = _field[index];
+                        ptrdiff_t r = _shift[0] - cast(ptrdiff_t)ret[0];
+                        ptrdiff_t c = _shift[1] - cast(ptrdiff_t)ret[1];
+                        return bc(_input, r, c);
+                    }
+                }
+
+                auto inputWindow = FieldIterator!ndIotaWithShiftField(0, ndIotaWithShiftField([r + kh, c + kh], ndIotaField!2(ks), input)).sliced(ks, ks);
+                prealloc[r, c] = bilateralFilterImpl(inputWindow, maskBuf, sigmaCol, sigmaSpace);
+            }
+    }
+
+    return output;
+}
+*/
+
+@nogc nothrow
+auto convImpl(OutputType, alias bc, SliceKind k1, SliceKind k2, SliceKind k3, size_t[] packs,
+    size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+(
+    Slice!(k1, packs, InputIterator) input,
+    Slice!(k1, packs, OutputType*) output,
+    Slice!(k2, kPacks, KernelIterator) kernel,
+    Slice!(k3, kPacks, MaskType*) mask
+)
+if (packs[0] == 2)
+{
+    auto krs = kernel.length!0; // kernel rows
+    auto kcs = kernel.length!1; // kernel rows
+
+    auto krh = krs / 2;
+    auto kch = kcs / 2;
+
+    auto useMask = !mask.empty;
+
+    if (mask.empty)
+    {
+        auto packedWindows = zip!true(output, input).windows(krs, kcs);
+        foreach (prow; packedWindows)
             foreach (p; prow)
             {
                 p[krh, kch].a = reduce!kapply(0.0f, p.unzip!'b', kernel);
@@ -228,41 +362,44 @@ if (packs[0] == 2)
     }
     else
     {
-        auto packedWindows = zip!true(prealloc, input, mask).windows(krs, kcs);
-        foreach (prow; pool.parallel(packedWindows))
+        auto packedWindows = zip!true(output, input, mask).windows(krs, kcs);
+        foreach (prow; packedWindows)
             foreach (p; prow)
                 if (p[krh, kch].c)
                     p[krh, kch].a = reduce!kapply(0.0f, p.unzip!'b', kernel);
     }
 
-    handleEdgeConv2d!bc(input, prealloc, kernel, mask, [0, input.length!0], [0, kch]); // upper row
-    handleEdgeConv2d!bc(input, prealloc, kernel, mask, [0, input.length!0], [input.length!1 - kch, input.length!1]); // lower row
-    handleEdgeConv2d!bc(input, prealloc, kernel, mask, [0, krh], [0, input.length!1]); // left column
-    handleEdgeConv2d!bc(input, prealloc, kernel, mask, [input.length!0 - krh, input.length!0], [0, input.length!1]); // right column
+    handleEdgeConv2d!bc(input, output, kernel, mask, [0, input.length!0], [0, kch]); // upper row
+    handleEdgeConv2d!bc(input, output, kernel, mask, [0, input.length!0], [input.length!1 - kch, input.length!1]); // lower row
+    handleEdgeConv2d!bc(input, output, kernel, mask, [0, krh], [0, input.length!1]); // left column
+    handleEdgeConv2d!bc(input, output, kernel, mask, [input.length!0 - krh, input.length!0], [0, input.length!1]); // right column
 
-    return prealloc;
+    return output;
 }
 
-auto convImpl(OutputType, alias bc, size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
+nothrow @nogc
+auto convImpl(OutputType, alias bc,
+SliceKind k1, SliceKind k2, SliceKind k3,
+size_t[] packs, size_t[] kPacks, InputIterator, KernelIterator, MaskType)
 (
-    Slice!(Contiguous, packs, InputIterator) input,
-    Slice!(Contiguous, kPacks, KernelIterator) kernel,
-    Slice!(Contiguous, packs, OutputType*) prealloc,
-    Slice!(Contiguous, kPacks, MaskType*) mask,
-    TaskPool pool = taskPool
+    Slice!(k1, packs, InputIterator) input,
+    Slice!(k1, packs, OutputType*) output,
+    Slice!(k2, kPacks, KernelIterator) kernel,
+    Slice!(k3, kPacks, MaskType*) mask,
 )
 if (packs[0] == 3)
 {
     foreach (i; 0 .. input.length!2)
     {
-        auto r_c = input[0 .. $, 0 .. $, i];
-        auto p_c = prealloc[0 .. $, 0 .. $, i];
-        r_c.conv(kernel, p_c, mask, pool);
+        auto i_c = input[0 .. $, 0 .. $, i];
+        auto o_c = output[0 .. $, 0 .. $, i];
+        convImpl!(OutputType, bc)(i_c, o_c, kernel, mask);
     }
 
-    return prealloc;
+    return output;
 }
 
+nothrow @nogc
 void handleEdgeConv1d(alias bc, T, O, K, M,
     SliceKind kindi,
     SliceKind kindp,
@@ -270,7 +407,7 @@ void handleEdgeConv1d(alias bc, T, O, K, M,
     SliceKind kindm,
     )(
     Slice!(kindi, [1], T*) input,
-    Slice!(kindp, [1], O*) prealloc,
+    Slice!(kindp, [1], O*) output,
     Slice!(kindk, [1], K*) kernel,
     Slice!(kindm, [1], M*) mask,
     size_t from, size_t to)
@@ -286,7 +423,7 @@ body
     bool useMask = !mask.empty;
 
     Unqual!T t;
-    foreach (ref p; prealloc[from .. to])
+    foreach (ref p; output[from .. to])
     {
         if (useMask && mask[i] <= 0)
             goto loop_end;
@@ -303,9 +440,10 @@ body
     }
 }
 
+nothrow @nogc
 void handleEdgeConv2d(alias bc, SliceKind kind0, SliceKind kind1, SliceKind kind2, SliceKind kind3, T, O, K, M)(
     Slice!(kind0, [2], T*) input,
-    Slice!(kind1, [2], O*) prealloc,
+    Slice!(kind1, [2], O*) output,
     Slice!(kind2, [2], K*) kernel,
     Slice!(kind3, [2], M*) mask,
     size_t[2] rowRange, size_t[2] colRange)
@@ -323,7 +461,7 @@ body
 
     bool useMask = !mask.empty;
 
-    auto roi = prealloc[rowRange[0] .. rowRange[1], colRange[0] .. colRange[1]];
+    auto roi = output[rowRange[0] .. rowRange[1], colRange[0] .. colRange[1]];
 
     Unqual!T t;
     foreach (prow; roi)
