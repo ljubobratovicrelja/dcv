@@ -151,13 +151,13 @@ Warning:
     Given kernel is lazy, i.e. is evaluated on indexing. For convolution use, it is advised to pre-calculate values.
 
 Example:
-====
+----
 import mir.ndslice.allocation : slice;
 import dcv.imgproc.filter : gaussian;
 
 auto mask = gaussian!float(5, 1f) // create 5x5 mask, with x and y sigma of 1
                          .slice;  // evaluate mask values, and copy to a variable.
-====
+----
 */
 pure @nogc nothrow
 auto gaussian(V = float)(size_t[2] size, V sigmax, V sigmay)
@@ -209,6 +209,12 @@ body
     );
 
     return FieldIterator!GaussianKernel(0, kernel).sliced(size);
+}
+
+template GaussianKernel(T)
+{
+    import std.traits : ReturnType;
+    alias GaussianKernel = ReturnType!(gaussian!T);
 }
 
 /// ditto
