@@ -29,16 +29,14 @@ mixin template SparseOpticalFlow(PixelType, CoordType)
     Evaluate sparse optical flow method between two consecutive frames.
 
     Params:
-        f1              = First frame image.
-        f2              = Second frame image.
-        points          = points which are tracked.
-        searchRegions   = search region width and height for each point.
-        prevflow            = displacement values preallocated array.
-        usePrevious     = if algorithm should continue iterating by 
-                          using presented values in the flow array, set this to true.
-
-    Returns:
-        Array of 2 floating point values which represent movement of each given feature point, from f1 to f2.
+        prevFrame       = First (previous) frame image.
+        currFrame       = Second (current) frame image.
+        prevPoints      = Input points, to be tracked to the current frame.
+        currPoints      = Output point, tracking result from the input points of the previous to the current frame.
+        error           = Error values for each point tracked.
+        up              = Flag telling whether to use or not to use values present in the output point buffer as initial result.
+                          If flag has negative value, input point coordinates are considered as initial for the optical flow estimate.
+                          If flag is positive, buffer is cosidered to be of same size as the input point buffer.
     */
     void evaluate
     (
