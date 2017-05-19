@@ -597,11 +597,6 @@ class Figure
 
     /// Draw image onto figure canvas.
     void draw(Image image)
-    out
-    {
-        assert(image.data.length == _data.length);
-    }
-    body
     {
         Image showImage = adoptImage(image);
 
